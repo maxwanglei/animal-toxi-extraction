@@ -40,6 +40,7 @@ def main():
     parser.add_argument("--model-path", default="/path/to/llama-model", help="Local LLM model path")
     parser.add_argument("--provider", default=os.environ.get("PROVIDER", "meta-llama"))
     parser.add_argument("--model", default=os.environ.get("MODEL_NAME"))
+    parser.add_argument("--api-key", default=os.environ.get("LLAMA_API_KEY"), help="API key for the provider")
     parser.add_argument("--base-url", default=os.environ.get("LLAMA_BASE_URL"))
     # Vertex AI specific
     parser.add_argument("--project-id", default=os.environ.get("GOOGLE_CLOUD_PROJECT"))
@@ -66,9 +67,12 @@ def main():
     provider_name = args.provider
     provider_kwargs = {}
     if provider_name in ("meta-llama", "llama", "llama-meta"):
+        api_key = args.api_key
+        if not api_key:
+            parser.error("--api-key or LLAMA_API_KEY env var is required for provider meta-llama")
         provider_kwargs = dict(
             model=args.model,
-            api_key=os.environ.get("LLAMA_API_KEY"),
+            api_key=api_key,
             base_url=args.base_url,
             temperature=args.temperature,
             top_p=args.top_p,
@@ -91,6 +95,8 @@ def main():
             location=args.location,
             model=args.model,
         )
+        # Note: VertexAIProvider does not take max_tokens in __init__
+        # but the pipeline should pass it to generate()
     elif provider_name == "local":
         provider_kwargs = dict(model_path=args.model_path)
     else:
@@ -101,7 +107,7 @@ def main():
 
     # If user explicitly selects local, use LocalLLMProvider; otherwise use the constructed provider
     llm = provider if provider_name != "local" else LocalLLMProvider(model_path=args.model_path)
-    pipeline = ToxicityExtractionPipeline(llm, output_dir=args.out)
+    pipeline = ToxicityExtractionPipeline(llm, output_dir=args.out, max_tokens=args.max_tokens)
     lab_df, organ_df = pipeline.process_batch(args.xml)
 
     metrics = pipeline.validate_results(lab_df, organ_df)

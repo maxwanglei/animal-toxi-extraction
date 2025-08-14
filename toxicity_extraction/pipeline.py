@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 class ToxicityExtractionPipeline:
     """Pipeline for batch processing multiple PMC files"""
 
-    def __init__(self, llm_provider, output_dir: str = "./output"):
-        self.extractor = ToxicityDataExtractor(llm_provider)
+    def __init__(self, llm_provider, output_dir: str = "./output", max_tokens: int = 2048):
+        self.extractor = ToxicityDataExtractor(llm_provider, max_tokens=max_tokens)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
 

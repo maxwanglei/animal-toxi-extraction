@@ -40,7 +40,7 @@ class VertexAIProvider(LLMProvider):
         self.model = GenerativeModel(model)
 
     def generate(self, prompt: str, system_prompt: Optional[str] = None,
-                 temperature: float = 0.1, max_tokens: int = 2000) -> str:
+                 temperature: float = 0.1, max_tokens: int = 8192) -> str:
         full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
         response = self.model.generate_content(
             full_prompt,
@@ -58,7 +58,7 @@ class GeminiProvider(LLMProvider):
         self.model = genai.GenerativeModel(model)
 
     def generate(self, prompt: str, system_prompt: Optional[str] = None,
-                 temperature: float = 0.1, max_tokens: int = 2000) -> str:
+                 temperature: float = 0.1, max_tokens: int = 8192) -> str:
         full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
         response = self.model.generate_content(
             full_prompt,
@@ -133,36 +133,161 @@ except Exception:
 
 class MetaLlamaProvider(LLMProvider):
     """
-    Meta Llama provider via OpenAI-compatible Chat Completions API.
+    Meta Llama provider using native llama_api_client with JSON schema enforcement.
 
     Env vars:
       - LLAMA_API_KEY (required)
-      - LLAMA_BASE_URL (optional; defaults to https://api.llama.com/compat/v1/)
     """
 
     def __init__(
         self,
         model: str,
         api_key: str,
-        base_url: str,
-        default_temperature: float = 0.6,
+        base_url: str = None,
+        default_temperature: float = 0.0,
         default_top_p: float = 0.9,
         default_frequency_penalty: float = 1.0,
         default_max_completion_tokens: int = 2048,
     ) -> None:
-        if OpenAI is None:
-            raise RuntimeError("openai package not installed. Run: pip install openai")
         self.model = model
         self.api_key = api_key or os.environ.get("LLAMA_API_KEY")
         if not self.api_key:
             raise RuntimeError("LLAMA_API_KEY is not set")
-        self.base_url = base_url or os.environ.get("LLAMA_BASE_URL", "https://api.llama.com/compat/v1/")
-        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        
+        self.base_url = base_url or "https://api.llama.com/compat/v1/"
         self.default_temperature = default_temperature
         self.default_top_p = default_top_p
         self.default_frequency_penalty = default_frequency_penalty
         self.default_max_completion_tokens = default_max_completion_tokens
-        logger.info("MetaLlamaProvider initialized: model=%s base_url=%s", self.model, self.base_url)
+        
+        # Define JSON schemas for strict validation
+        self.relevance_schema = {
+            "name": "relevance_assessment",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "is_relevant": {"type": "boolean"},
+                    "relevance_score": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "data_types": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["lab_tests", "organ_injury", "toxicity_frequencies"]}
+                    },
+                    "reason": {"type": "string"}
+                },
+                "required": ["is_relevant", "relevance_score", "data_types", "reason"],
+                "additionalProperties": False
+            }
+        }
+        
+        self.extraction_schema = {
+            "name": "toxicity_extraction",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "lab_tests": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "drug": {"type": "string"},
+                                "dose": {"type": "string"},
+                                "lab_test": {"type": "string"},
+                                "value_mean": {"type": ["number", "null"]},
+                                "value_std": {"type": ["number", "null"]},
+                                "value_raw": {"type": "string"},
+                                "sample_size": {"type": ["integer", "null"]},
+                                "time_point": {"type": ["string", "null"]},
+                                "species": {"type": "string"},
+                                "additional_info": {"type": ["string", "null"]}
+                            },
+                            "required": ["drug", "dose", "lab_test", "value_raw", "species"],
+                            "additionalProperties": False
+                        }
+                    },
+                    "organ_injuries": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "drug": {"type": "string"},
+                                "dose": {"type": "string"},
+                                "injury_type": {"type": "string"},
+                                "frequency": {"type": ["integer", "null"]},
+                                "total_animals": {"type": ["integer", "null"]},
+                                "severity": {"type": ["string", "null"]},
+                                "time_point": {"type": ["string", "null"]},
+                                "species": {"type": "string"},
+                                "additional_info": {"type": ["string", "null"]}
+                            },
+                            "required": ["drug", "dose", "injury_type", "species"],
+                            "additionalProperties": False
+                        }
+                    }
+                },
+                "required": ["lab_tests", "organ_injuries"],
+                "additionalProperties": False
+            }
+        }
+        
+        logger.info("MetaLlamaProvider initialized: model=%s using native client", self.model)
+
+    def chat_with_schema(
+        self,
+        messages: List[Dict[str, Any]],
+        schema: Dict[str, Any],
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> str:
+        """Generate response with JSON schema enforcement."""
+        import requests
+        
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.default_temperature if temperature is None else temperature,
+            "max_tokens": self.default_max_completion_tokens if max_tokens is None else max_tokens,
+            "top_p": self.default_top_p if top_p is None else top_p,
+            "repetition_penalty": self.default_frequency_penalty if frequency_penalty is None else frequency_penalty,
+        }
+        
+        endpoint = f"{self.base_url.rstrip('/')}/chat/completions"
+        
+        try:
+            response = requests.post(endpoint, headers=headers, json=data, timeout=120)
+            response.raise_for_status()
+            
+            response_json = response.json()
+            content = response_json["choices"][0]["message"]["content"]
+            
+            try:
+                usage = response_json.get("usage")
+                if usage:
+                    logger.info(
+                        "MetaLlama response: id=%s usage(prompt=%s, completion=%s, total=%s)",
+                        response_json.get("id"),
+                        usage.get("prompt_tokens"),
+                        usage.get("completion_tokens"),
+                        usage.get("total_tokens"),
+                    )
+                else:
+                    logger.info("MetaLlama response: id=%s (no usage field)", response_json.get("id"))
+            except Exception:
+                pass
+            
+            return content
+            
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                logger.error("MetaLlama API error response: %s", e.response.text)
+            logger.error("Error in MetaLlama chat_with_schema: %s", e)
+            raise
 
     def chat(
         self,
@@ -172,35 +297,35 @@ class MetaLlamaProvider(LLMProvider):
         frequency_penalty: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> str:
-        # messages: [{"role": "system"|"user"|"assistant", "content": "..."}]
-        resp = self.client.chat.completions.create(
-            messages=messages,
-            model=self.model,
-            temperature=self.default_temperature if temperature is None else temperature,
-            # Use OpenAI-compatible parameter name
-            max_tokens=self.default_max_completion_tokens if max_tokens is None else max_tokens,
-            top_p=self.default_top_p if top_p is None else top_p,
-            frequency_penalty=self.default_frequency_penalty if frequency_penalty is None else frequency_penalty,
-            # Enforce JSON-only output to reduce parsing errors
-            response_format={"type": "json_object"},
-        )
-        # Log response metadata for debugging/accounting correlation
+        """Basic chat without schema enforcement for backward compatibility."""
+        import requests
+        
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.default_temperature if temperature is None else temperature,
+            "max_tokens": self.default_max_completion_tokens if max_tokens is None else max_tokens,
+            "top_p": self.default_top_p if top_p is None else top_p,
+            "repetition_penalty": self.default_frequency_penalty if frequency_penalty is None else frequency_penalty,
+            "response_format": {"type": "json_object"}
+        }
+        
+        endpoint = f"{self.base_url.rstrip('/')}/chat/completions"
+        
         try:
-            usage = getattr(resp, "usage", None)
-            if usage:
-                logger.info(
-                    "MetaLlama response: id=%s usage(prompt=%s, completion=%s, total=%s)",
-                    getattr(resp, "id", None),
-                    getattr(usage, "prompt_tokens", None),
-                    getattr(usage, "completion_tokens", None),
-                    getattr(usage, "total_tokens", None),
-                )
-            else:
-                logger.info("MetaLlama response: id=%s (no usage field)", getattr(resp, "id", None))
-        except Exception:
-            pass
-        # Return assistant text
-        return resp.choices[0].message.content
+            response = requests.post(endpoint, headers=headers, json=data, timeout=120)
+            response.raise_for_status()
+            return response.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                logger.error("MetaLlama API error response: %s", e.response.text)
+            logger.error("Error in MetaLlama chat: %s", e)
+            raise
 
     def generate(
         self,
@@ -209,19 +334,34 @@ class MetaLlamaProvider(LLMProvider):
         temperature: float = 0.1,
         max_tokens: int = 2000,
     ) -> str:
-        """Generate a response using the OpenAI-compatible chat completions API.
-
-        This wraps the chat() method to satisfy the LLMProvider abstract interface.
-        """
+        """Generate a response using the native llama_api_client with schema enforcement."""
         messages: List[Dict[str, Any]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
-        return self.chat(
-            messages=messages,
-            temperature=temperature if temperature is not None else self.default_temperature,
-            max_tokens=max_tokens if max_tokens is not None else self.default_max_completion_tokens,
-        )
+        
+        # Determine which schema to use based on system prompt content
+        if system_prompt and "relevance_assessment" in system_prompt.lower():
+            return self.chat_with_schema(
+                messages=messages,
+                schema=self.relevance_schema,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        elif system_prompt and "extract" in system_prompt.lower():
+            return self.chat_with_schema(
+                messages=messages,
+                schema=self.extraction_schema,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        else:
+            # Fallback to basic chat for other use cases
+            return self.chat(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
 
 
 def make_provider(name: str, **kwargs) -> LLMProvider:
