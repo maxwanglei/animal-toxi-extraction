@@ -1,7 +1,9 @@
 from typing import Optional, Any, Dict, List
 import os
-
+import logging
 from .base import LLMProvider
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAIProvider(LLMProvider):
@@ -79,7 +81,12 @@ class LlamaAPIProvider(LLMProvider):
         if system_prompt:
             data["messages"].append({"role": "system", "content": system_prompt})
         data["messages"].append({"role": "user", "content": prompt})
-        response = requests.post(f"{self.base_url}/chat/completions", headers=headers, json=data)
+        response = requests.post(
+            f"{self.base_url}/chat/completions",
+            headers=headers,
+            json=data,
+            timeout=60,
+        )
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
 
@@ -130,6 +137,7 @@ class MetaLlamaProvider(LLMProvider):
       - LLAMA_API_KEY (required)
       - LLAMA_BASE_URL (optional; defaults to https://api.llama.com/compat/v1/)
     """
+
     def __init__(
         self,
         model: str,
@@ -152,6 +160,7 @@ class MetaLlamaProvider(LLMProvider):
         self.default_top_p = default_top_p
         self.default_frequency_penalty = default_frequency_penalty
         self.default_max_completion_tokens = default_max_completion_tokens
+        logger.info("MetaLlamaProvider initialized: model=%s base_url=%s", self.model, self.base_url)
 
     def chat(
         self,
@@ -171,6 +180,21 @@ class MetaLlamaProvider(LLMProvider):
             top_p=self.default_top_p if top_p is None else top_p,
             frequency_penalty=self.default_frequency_penalty if frequency_penalty is None else frequency_penalty,
         )
+        # Log response metadata for debugging/accounting correlation
+        try:
+            usage = getattr(resp, "usage", None)
+            if usage:
+                logger.info(
+                    "MetaLlama response: id=%s usage(prompt=%s, completion=%s, total=%s)",
+                    getattr(resp, "id", None),
+                    getattr(usage, "prompt_tokens", None),
+                    getattr(usage, "completion_tokens", None),
+                    getattr(usage, "total_tokens", None),
+                )
+            else:
+                logger.info("MetaLlama response: id=%s (no usage field)", getattr(resp, "id", None))
+        except Exception:
+            pass
         # Return assistant text
         return resp.choices[0].message.content
 
