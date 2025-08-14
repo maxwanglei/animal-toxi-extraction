@@ -22,7 +22,9 @@ class OpenAIProvider(LLMProvider):
         messages.append({"role": "user", "content": prompt})
         response = self.client.chat.completions.create(
             model=self.model, messages=messages,
-            temperature=temperature, max_tokens=max_tokens
+            temperature=temperature, max_tokens=max_tokens,
+            # Encourage strict JSON-only output when prompts ask for JSON
+            response_format={"type": "json_object"}
         )
         return response.choices[0].message.content
 
@@ -179,6 +181,8 @@ class MetaLlamaProvider(LLMProvider):
             max_tokens=self.default_max_completion_tokens if max_tokens is None else max_tokens,
             top_p=self.default_top_p if top_p is None else top_p,
             frequency_penalty=self.default_frequency_penalty if frequency_penalty is None else frequency_penalty,
+            # Enforce JSON-only output to reduce parsing errors
+            response_format={"type": "json_object"},
         )
         # Log response metadata for debugging/accounting correlation
         try:

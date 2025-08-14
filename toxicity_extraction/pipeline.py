@@ -43,7 +43,7 @@ class ToxicityExtractionPipeline:
         )
         return combined_lab_df, combined_organ_df
 
-    def _process_pmc_file(self, xml_path: str):
+    def _process_pmc_file(self, xml_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
         parser = PMCXMLParser(xml_path)
         pmid = parser.pmid
         all_lab_results: List[Dict[str, Any]] = []
@@ -51,6 +51,7 @@ class ToxicityExtractionPipeline:
 
         # Process tables
         tables = parser.extract_tables()
+        logger.debug("%s: found %d tables", xml_path, len(tables))
         for table in tables:
             full_content = (
                 f"Table {table['label']}\nCaption: {table['caption']}\n{table['content']}\nFooter: {table['footer']}"
@@ -65,8 +66,11 @@ class ToxicityExtractionPipeline:
 
         # Process body sections
         sections = parser.extract_body_sections()
+        logger.debug("%s: found %d body sections", xml_path, len(sections))
         for section in sections:
-            if any(k in section['title'].lower() for k in ['result', 'toxicity', 'safety', 'adverse', 'effect']):
+            if any(k in section['title'].lower() for k in [
+                'result', 'toxicity', 'safety', 'adverse', 'effect'
+            ]):
                 relevance = self.extractor.assess_relevance(section['content'], "text")
                 if relevance.get("is_relevant", False) and relevance.get("relevance_score", 0) > 50:
                     lab_results, organ_results = self.extractor.extract_data(
@@ -74,6 +78,43 @@ class ToxicityExtractionPipeline:
                     )
                     all_lab_results.extend(asdict(r) for r in lab_results)
                     all_organ_results.extend(asdict(r) for r in organ_results)
+
+        # Fallback: if nothing extracted, try full body text once
+        if not all_lab_results and not all_organ_results:
+            full_body = parser.extract_full_body_text()
+            logger.debug("%s: fallback full body length=%d", xml_path, len(full_body))
+            if full_body:
+                relevance = self.extractor.assess_relevance(full_body, "text")
+                if relevance.get("is_relevant", False) and relevance.get("relevance_score", 0) > 50:
+                    lab_results, organ_results = self.extractor.extract_data(
+                        full_body, pmid, "section_full_body"
+                    )
+                    all_lab_results.extend(asdict(r) for r in lab_results)
+                    all_organ_results.extend(asdict(r) for r in organ_results)
+            else:
+                # Second-chance fallback: concatenate all <p> texts
+                para_text = parser.extract_all_paragraph_text()
+                logger.debug("%s: paragraph fallback length=%d", xml_path, len(para_text))
+                if para_text:
+                    relevance = self.extractor.assess_relevance(para_text, "text")
+                    if relevance.get("is_relevant", False) and relevance.get("relevance_score", 0) > 50:
+                        lab_results, organ_results = self.extractor.extract_data(
+                            para_text, pmid, "section_paragraphs"
+                        )
+                        all_lab_results.extend(asdict(r) for r in lab_results)
+                        all_organ_results.extend(asdict(r) for r in organ_results)
+                else:
+                    # Ultimate fallback: entire document text
+                    doc_text = parser.extract_document_text()
+                    logger.debug("%s: document fallback length=%d", xml_path, len(doc_text))
+                    if doc_text:
+                        relevance = self.extractor.assess_relevance(doc_text, "text")
+                        if relevance.get("is_relevant", False) and relevance.get("relevance_score", 0) > 50:
+                            lab_results, organ_results = self.extractor.extract_data(
+                                doc_text, pmid, "section_document"
+                            )
+                            all_lab_results.extend(asdict(r) for r in lab_results)
+                            all_organ_results.extend(asdict(r) for r in organ_results)
 
         lab_df = pd.DataFrame(all_lab_results)
         organ_df = pd.DataFrame(all_organ_results)

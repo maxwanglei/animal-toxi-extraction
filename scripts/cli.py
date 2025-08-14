@@ -1,12 +1,36 @@
 import os
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import argparse
 
 from toxicity_extraction.llm.providers import LocalLLMProvider, make_provider
 from toxicity_extraction.pipeline import ToxicityExtractionPipeline
 
-logging.basicConfig(level=logging.INFO)
+def setup_logging(log_file: str, level: str = "INFO") -> None:
+    # Ensure directory exists
+    log_dir = os.path.dirname(log_file) or "."
+    os.makedirs(log_dir, exist_ok=True)
+
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+    # Avoid duplicate handlers if main() called multiple times
+    root.handlers = []
+
+    # Console handler
+    ch = logging.StreamHandler()
+    ch.setLevel(getattr(logging, level.upper(), logging.INFO))
+    ch.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+    root.addHandler(ch)
+
+    # Rotating file handler (verbose)
+    fh = RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=3)
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter(
+        fmt="%(asctime)s %(levelname)s %(name)s:%(lineno)d - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    root.addHandler(fh)
 
 
 def main():
@@ -26,10 +50,17 @@ def main():
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--frequency-penalty", type=float, default=1.0)
     parser.add_argument("--max-tokens", type=int, default=2048)
+    parser.add_argument("--log-file", default=None, help="Path to write logs; defaults to <out>/run.log")
+    parser.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"), help="Console log level (INFO/DEBUG/...) ")
     args = parser.parse_args()
 
     if args.provider != "local" and not args.model:
         parser.error("--model is required (or set MODEL_NAME) for remote providers (meta-llama, gemini, vertex-ai)")
+
+    # Initialize logging as early as possible
+    log_file = args.log_file or os.path.join(args.out, "run.log")
+    setup_logging(log_file, args.log_level)
+    logging.getLogger(__name__).info("Logging to %s (level=%s)", log_file, args.log_level.upper())
 
     # Build the appropriate provider with the right credentials
     provider_name = args.provider
