@@ -38,7 +38,12 @@ def main():
     parser.add_argument("--xml", nargs="+", required=True, help="Paths to PMC XML files")
     parser.add_argument("--out", default="./toxicity_output", help="Output directory")
     parser.add_argument("--model-path", default="/path/to/llama-model", help="Local LLM model path")
-    parser.add_argument("--provider", default=os.environ.get("PROVIDER", "meta-llama"))
+    parser.add_argument(
+        "--provider",
+        choices=["meta-llama", "gemini", "vertex-ai", "local"],
+        default=os.environ.get("PROVIDER", "meta-llama"),
+        help="LLM provider to use",
+    )
     parser.add_argument("--model", default=os.environ.get("MODEL_NAME"))
     parser.add_argument("--api-key", default=os.environ.get("LLAMA_API_KEY"), help="API key for the provider")
     parser.add_argument("--base-url", default=os.environ.get("LLAMA_BASE_URL"))
@@ -62,6 +67,7 @@ def main():
     log_file = args.log_file or os.path.join(args.out, "run.log")
     setup_logging(log_file, args.log_level)
     logging.getLogger(__name__).info("Logging to %s (level=%s)", log_file, args.log_level.upper())
+    logging.getLogger(__name__).info("Provider selected: %s", args.provider)
 
     # Build the appropriate provider with the right credentials
     provider_name = args.provider

@@ -34,19 +34,103 @@ class VertexAIProvider(LLMProvider):
 
     def __init__(self, project_id: str, location: str = "us-central1",
                  model: str = "gemini-1.5-pro"):
-        from google.cloud import aiplatform
-        from vertexai.generative_models import GenerativeModel
-        aiplatform.init(project=project_id, location=location)
-        self.model = GenerativeModel(model)
+        """Initialize Vertex AI client.
+
+        Prefers the new google-genai client in Vertex mode (ADC based),
+        and falls back to the legacy vertexai GenerativeModel if unavailable.
+        """
+        self._use_google_genai = False
+        self._model_name = model
+        self._project_id = project_id
+        self._location = location
+
+        # Warn if a direct Gemini API key is set; Vertex uses ADC instead.
+        if os.environ.get("GOOGLE_API_KEY"):
+            logger.warning(
+                "GOOGLE_API_KEY is set but will be ignored by VertexAIProvider (uses ADC via gcloud/service account)."
+            )
+
+        try:
+            # New unified client
+            from google import genai as google_genai  # type: ignore
+            from google.genai import types as genai_types  # type: ignore
+            self._genai = google_genai
+            self._genai_types = genai_types
+            # Creates a client bound to Vertex AI using ADC
+            self._client = self._genai.Client(
+                vertexai=True,
+                project=project_id,
+                location=location,
+            )
+            self._use_google_genai = True
+            logger.info(
+                "Initialized Vertex AI provider using google-genai client: project=%s location=%s model=%s",
+                project_id,
+                location,
+                model,
+            )
+        except Exception as e:
+            logger.info(
+                "google-genai not available or failed to initialize (%s). Falling back to vertexai SDK.",
+                str(e)[:120],
+            )
+            from google.cloud import aiplatform
+            from vertexai.generative_models import GenerativeModel
+            aiplatform.init(project=project_id, location=location)
+            self.model = GenerativeModel(model)
 
     def generate(self, prompt: str, system_prompt: Optional[str] = None,
                  temperature: float = 0.1, max_tokens: int = 8192) -> str:
         full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
-        response = self.model.generate_content(
-            full_prompt,
-            generation_config={"temperature": temperature, "max_output_tokens": max_tokens}
-        )
-        return response.text
+
+        if self._use_google_genai:
+            # Build request for google-genai Vertex client
+            T = self._genai_types
+            try:
+                config = T.GenerateContentConfig(
+                    temperature=temperature,
+                    max_output_tokens=max_tokens,
+                )
+            except Exception:
+                # Minimal dict fallback if types object is different
+                config = {
+                    "temperature": temperature,
+                    "max_output_tokens": max_tokens,
+                }
+
+            # Create a single user content with the full text instruction
+            try:
+                contents = [T.Content(role="user", parts=[full_prompt])]  # type: ignore
+            except Exception:
+                contents = [full_prompt]
+
+            try:
+                resp = self._client.models.generate_content(
+                    model=self._model_name,
+                    contents=contents,
+                    config=config,
+                )
+                # google-genai responses expose .text
+                text = getattr(resp, "text", None)
+                if text is None:
+                    # Fallback: attempt to join chunks if present
+                    parts = []
+                    for ch in getattr(resp, "candidates", []) or []:
+                        part_text = getattr(getattr(ch, "content", None), "parts", None)
+                        if part_text:
+                            parts.extend([str(p) for p in part_text])
+                    text = "".join(parts) if parts else ""
+                return text or ""
+            except Exception as e:
+                logger.error("Vertex (google-genai) generate failed: %s", e)
+                raise
+        else:
+            # Legacy SDK path
+            response = self.model.generate_content(
+                full_prompt,
+                generation_config={"temperature": temperature, "max_output_tokens": max_tokens}
+            )
+            return response.text
 
 
 class GeminiProvider(LLMProvider):
