@@ -448,14 +448,27 @@ class MetaLlamaProvider(LLMProvider):
             )
 
 
+from .langchain_provider import LangChainProvider
+
+
 def make_provider(name: str, **kwargs) -> LLMProvider:
     """
     Factory to create a provider by name.
     """
+    if name == "langchain":
+        return LangChainProvider(
+            api_key=kwargs["api_key"],
+            model=kwargs["model"],
+            base_url=kwargs.get("base_url"),
+        )
     if name == "openai":
         return OpenAIProvider(api_key=kwargs["api_key"], model=kwargs["model"])
     if name == "vertex-ai":
-        return VertexAIProvider(project_id=kwargs["project_id"], location=kwargs.get("location", "us-central1"), model=kwargs["model"])
+        return VertexAIProvider(
+            project_id=kwargs["project_id"],
+            location=kwargs.get("location", "us-central1"),
+            model=kwargs["model"],
+        )
     if name == "gemini":
         return GeminiProvider(api_key=kwargs["api_key"], model=kwargs["model"])
     if name in ("meta-llama", "llama", "llama-meta"):
