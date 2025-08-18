@@ -281,8 +281,9 @@ class EnhancedToxicityExtractionPipeline:
 
             # Ultimate fallback: paragraph text
             if len(all_lab_results) + len(all_organ_results) == 0:
-                para_text = parser.extract_all_paragraph_text()
-                if para_text:
+                para_text_list = parser.extract_all_paragraph_text()
+                if para_text_list:
+                    para_text = "\n\n".join(para_text_list)
                     try:
                         relevance = self.text_extractor.assess_relevance(para_text, "text")
                         if relevance.get("is_relevant", False) and relevance.get("relevance_score", 0) > 25:

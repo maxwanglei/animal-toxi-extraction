@@ -76,7 +76,7 @@ Examples:
     parser.add_argument("--model-path", default="/path/to/llama-model", help="Local LLM model path")
     parser.add_argument(
         "--provider",
-        choices=["meta-llama", "gemini", "vertex-ai", "local"],
+        choices=["meta-llama", "gemini", "vertex-ai", "local", "langchain"],
         default=os.environ.get("PROVIDER", "meta-llama"),
         help="LLM provider to use",
     )
@@ -169,6 +169,15 @@ def build_provider(args, parser):
             project_id=args.project_id,
             location=args.location,
             model=args.model,
+        )
+    elif provider_name == "langchain":
+        api_key = args.api_key or os.environ.get("LLAMA_API_KEY")
+        if not api_key:
+            parser.error("--api-key or LLAMA_API_KEY env var is required for provider langchain")
+        provider_kwargs = dict(
+            api_key=api_key,
+            model=args.model,
+            base_url=args.base_url,
         )
     elif provider_name == "local":
         return LocalLLMProvider(model_path=args.model_path)
