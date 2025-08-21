@@ -61,8 +61,12 @@ Examples:
         """
     )
     
-    # Required arguments
-    parser.add_argument("--xml", nargs="+", required=True, help="Paths to PMC XML files")
+    # Required input: either explicit XMLs or a file containing a list of XML paths
+    parser.add_argument("--xml", nargs="+", help="Paths to PMC XML files")
+    parser.add_argument(
+        "--xml-list",
+        help="Path to a newline-delimited file containing PMC XML paths (use for large batches)",
+    )
     parser.add_argument("--out", default="./toxicity_output", help="Output directory")
     
     # Pipeline selection
@@ -114,6 +118,21 @@ Examples:
     # Validation
     if args.provider != "local" and not args.model:
         parser.error("--model is required (or set MODEL_NAME) for remote providers (meta-llama, gemini, vertex-ai)")
+
+    # Load XML list if provided
+    if args.xml_list:
+        if args.xml:
+            parser.error("Provide either --xml or --xml-list, not both.")
+        if not os.path.exists(args.xml_list):
+            parser.error(f"--xml-list file not found: {args.xml_list}")
+        with open(args.xml_list, "r", encoding="utf-8") as f:
+            xmls = [line.strip() for line in f if line.strip()]
+        if not xmls:
+            parser.error("--xml-list file is empty.")
+        # Replace args.xml for downstream usage
+        args.xml = xmls
+    if not args.xml:
+        parser.error("No XML inputs provided. Use --xml or --xml-list.")
 
     # Initialize logging
     log_file = args.log_file or os.path.join(args.out, "run.log")
