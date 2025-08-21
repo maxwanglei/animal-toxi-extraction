@@ -9,9 +9,11 @@ class LabTestResult:
     drug: str
     dose: str
     lab_test: str
+    unit: Optional[str]
     value_mean: Optional[float]
     value_std: Optional[float]
     value_raw: str  # Original text representation
+    descriptive_values: Optional[str]
     sample_size: Optional[int]
     time_point: Optional[str]
     species: Optional[str]
@@ -32,5 +34,6 @@ class OrganInjuryResult:
     severity: Optional[str]
     time_point: Optional[str]
     species: Optional[str]
+    descriptive_values: Optional[str]
     additional_info: Optional[str]
     source_location: str

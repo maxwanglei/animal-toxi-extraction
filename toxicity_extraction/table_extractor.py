@@ -215,22 +215,27 @@ Rules:
         combined_text = (md_table + " " + caption).lower()
         
         # Look for lab test indicators
-        lab_indicators = ['alt', 'ast', 'alp', 'bilirubin', 'creatinine', 'bun', 'urea', 
+        lab_indicators = ['alt', 'ast', 'alp', 'bilirubin', 'creatinine', 'bun', 'urea', 'body weight'
                          'albumin', 'protein', 'glucose', 'cholesterol', 'triglyceride']
         lab_score = sum(10 for indicator in lab_indicators if indicator in combined_text)
-        
-        # Look for organ injury indicators  
-        organ_indicators = ['necrosis', 'damage', 'injury', 'toxicity', 'lesion', 'fibrosis',
+
+        # Look for organ injury indicators
+        organ_indicators = ['necrosis', 'damage', 'injury', 'toxicity', 'lesion', 'fibrosis', 'body weight decrease',
                            'inflammation', 'degeneration', 'hepatic', 'renal', 'cardiac']
         organ_score = sum(15 for indicator in organ_indicators if indicator in combined_text)
         
         # Look for dose indicators
-        dose_patterns = [r'\d+\s*mg/kg', r'\d+\s*g/kg', r'\d+\s*μg/kg', 'dose', 'treatment']
+        dose_patterns = [
+            r'\b\d+\s*mg/kg\b', r'\b\d+\s*g/kg\b', r'\b\d+\s*(μg|ug)/kg\b',
+            r'\b\d+\s*(mg|μg|ug|g)/(kg|body\s*weight)/(day|d)\b',
+            r'\b\d+\s*gy\b', r'\bpfu\b', r'\btcid\s*50\b',
+            'dose', 'treatment'
+        ]
         dose_score = sum(5 for pattern in dose_patterns 
                         if re.search(pattern, combined_text, re.IGNORECASE))
         
         # Look for animal study indicators
-        animal_indicators = ['rats', 'mice', 'rabbits', 'dogs', 'monkeys', 'animals', 'male', 'female']
+        animal_indicators = ['rats', 'mice', 'rabbits', 'dogs', 'monkeys', 'animals', 'male', 'female', 'fish']
         animal_score = sum(3 for indicator in animal_indicators if indicator in combined_text)
         
         total_score = min(100, lab_score + organ_score + dose_score + animal_score)
@@ -259,9 +264,10 @@ TABLE:
 
 CAPTION: {caption}
 
-Focus on quantitative lab values like ALT, AST, ALP, bilirubin, creatinine, BUN, etc.
-Extract actual numerical values with units when available.
-Identify dose groups, time points, and statistical measures."""
+Focus on quantitative lab values or biochemical markers like ALT, AST, ALP, bilirubin, creatinine, BUN, body weight, etc.
+Extract actual numerical values with their measurement unit when available (e.g., U/L, mg/dL, g/L).
+If only qualitative or conclusion text is present (e.g., "significantly increased"), capture it under descriptive_values and leave numerical values null.
+Identify dose groups, time points, statistical measures, and treatment names broadly (drug, vaccine, radiation, nanoparticles)."""
 
         system_prompt = """Extract lab test data and return ONLY valid JSON:
 
@@ -271,9 +277,11 @@ Identify dose groups, time points, and statistical measures."""
             "drug": "compound name",
             "dose": "10 mg/kg",
             "lab_test": "ALT",
+            "unit": "U/L",
             "value_mean": 45.2,
             "value_std": 5.1,
-            "value_raw": "45.2 ± 5.1",
+            "value_raw": "45.2 ± 5.1 U/L",
+            "descriptive_values": null,
             "sample_size": 8,
             "time_point": "24h",
             "species": "rats",
@@ -282,11 +290,13 @@ Identify dose groups, time points, and statistical measures."""
     ]
 }
 
-CRITICAL: Use EXACTLY these field names - drug, dose, lab_test, value_mean, value_std, value_raw, sample_size, time_point, species, additional_info.
+CRITICAL: Use EXACTLY these field names - drug, dose, lab_test, unit, value_mean, value_std, value_raw, descriptive_values, sample_size, time_point, species, additional_info.
 Rules:
-- Extract lab tests like ALT, AST, ALP, BUN, creatinine, glucose, etc.
+- Extract lab tests like ALT, AST, ALP, BUN, creatinine, glucose, body weight, etc.
 - Use exact numerical values when available
-- Use 0 for missing numerical values, "Unknown" for missing text
+- If only qualitative change is present, set descriptive_values and keep value_mean/value_std null
+- Use "Unknown" for missing text
+- Tumor weight is not considered as a lab test results
 - No code blocks or explanations"""
 
         try:
@@ -332,7 +342,8 @@ TABLE:
 CAPTION: {caption}
 
 Focus on organ damage, injuries, histopathological findings, toxicity frequencies.
-Look for data about liver, kidney, heart, lung damage or other organ toxicity."""
+Include descriptive/qualitative findings (e.g., "centrilobular necrosis", "vacuolar degeneration") even if no counts are provided.
+Identify treatments broadly (drug, vaccine, radiation, nanoparticles) and capture dose notations (e.g., mg/kg, Gy, PFU)."""
 
         system_prompt = """Extract organ injury data and return ONLY valid JSON:
 
@@ -347,15 +358,17 @@ Look for data about liver, kidney, heart, lung damage or other organ toxicity.""
             "severity": "mild",
             "time_point": "7 days",
             "species": "rats",
+            "descriptive_values": null,
             "additional_info": "focal areas, reversible"
         }
     ]
 }
 
-CRITICAL: Use EXACTLY these field names - drug, dose, injury_type, frequency, total_animals, severity, time_point, species, additional_info.
+CRITICAL: Use EXACTLY these field names - drug, dose, injury_type, frequency, total_animals, severity, time_point, species, descriptive_values, additional_info.
 Rules:
 - Extract specific injury types and affected organs
-- Include frequency data when available
+- body weight changes are also relevant
+- Include frequency data when available; if counts are not present, set frequency/total_animals to 0 and record qualitative details in descriptive_values
 - Use 0 for missing numerical values, "Unknown" for missing text
 - No code blocks or explanations"""
 
@@ -413,7 +426,7 @@ TABLE:
 
 CAPTION: {caption}
 
-Extract both laboratory test values and organ injury data comprehensively."""
+Extract both laboratory test values and organ injury data comprehensively. Include units for lab tests when present, and use descriptive_values when only qualitative descriptions are available. Recognize treatments including drugs, vaccines, radiation, and nanoparticles."""
 
         system_prompt = """Extract all toxicity data and return ONLY valid JSON:
 
@@ -423,9 +436,11 @@ Extract both laboratory test values and organ injury data comprehensively."""
             "drug": "compound name",
             "dose": "10 mg/kg", 
             "lab_test": "ALT",
+            "unit": "U/L",
             "value_mean": 45.2,
             "value_std": 3.1,
             "value_raw": "45.2 ± 3.1 U/L",
+            "descriptive_values": null,
             "sample_size": 8,
             "time_point": "24h",
             "species": "rats",
@@ -442,6 +457,7 @@ Extract both laboratory test values and organ injury data comprehensively."""
             "severity": "mild",
             "time_point": "7 days",
             "species": "rats",
+            "descriptive_values": null,
             "additional_info": "focal areas"
         }
     ]
@@ -449,7 +465,9 @@ Extract both laboratory test values and organ injury data comprehensively."""
 
 Rules:
 - Extract all relevant toxicity data
-- Use 0 for missing numbers, "Unknown" for missing text
+- For lab tests, include unit when present
+- If no numeric values exist, store qualitative/conclusion text in descriptive_values and leave numbers null
+- Use "Unknown" for missing text
 - No code blocks or explanations"""
 
         try:
@@ -459,9 +477,10 @@ Rules:
             lab_results = []
             for item in data.get("lab_tests", []):
                 try:
-                    item["pmid"] = pmid
-                    item["source_location"] = source_location
-                    lab_results.append(LabTestResult(**item))
+                    mapped_item = self._map_lab_test_fields(item)
+                    mapped_item["pmid"] = pmid
+                    mapped_item["source_location"] = source_location
+                    lab_results.append(LabTestResult(**mapped_item))
                 except Exception as e:
                     logger.debug("Failed to create LabTestResult: %s", e)
                     continue
@@ -469,13 +488,14 @@ Rules:
             organ_results = []
             for item in data.get("organ_injuries", []):
                 try:
-                    item["pmid"] = pmid
-                    item["source_location"] = source_location
-                    if item.get("frequency") and item.get("total_animals"):
-                        item["percentage"] = (item["frequency"] / item["total_animals"]) * 100
+                    mapped_item = self._map_organ_injury_fields(item)
+                    mapped_item["pmid"] = pmid
+                    mapped_item["source_location"] = source_location
+                    if mapped_item.get("frequency") and mapped_item.get("total_animals"):
+                        mapped_item["percentage"] = (mapped_item["frequency"] / mapped_item["total_animals"]) * 100
                     else:
-                        item["percentage"] = None
-                    organ_results.append(OrganInjuryResult(**item))
+                        mapped_item["percentage"] = None
+                    organ_results.append(OrganInjuryResult(**mapped_item))
                 except Exception as e:
                     logger.debug("Failed to create OrganInjuryResult: %s", e)
                     continue
@@ -713,6 +733,12 @@ Rules:
             'notes': 'additional_info',
             'comments': 'additional_info',
             'details': 'additional_info',
+            'units': 'unit',
+            'measure_unit': 'unit',
+            'measurement_unit': 'unit',
+            'qualitative': 'descriptive_values',
+            'description': 'descriptive_values',
+            'conclusion': 'descriptive_values',
         }
         
         mapped_item = {}
@@ -722,9 +748,11 @@ Rules:
             'drug': 'Unknown',
             'dose': 'Unknown', 
             'lab_test': 'Unknown',
+            'unit': None,
             'value_mean': None,
             'value_std': None,
             'value_raw': 'Unknown',
+            'descriptive_values': None,
             'sample_size': None,
             'time_point': 'Unknown',
             'species': 'Unknown',
@@ -806,6 +834,10 @@ Rules:
             'notes': 'additional_info',
             'comments': 'additional_info',
             'details': 'additional_info',
+            'qualitative': 'descriptive_values',
+            'description': 'descriptive_values',
+            'finding_text': 'descriptive_values',
+            'conclusion': 'descriptive_values',
         }
         
         mapped_item = {}
@@ -821,6 +853,7 @@ Rules:
             'severity': 'Unknown',
             'time_point': 'Unknown',
             'species': 'Unknown',
+            'descriptive_values': None,
             'additional_info': None,
         }
         

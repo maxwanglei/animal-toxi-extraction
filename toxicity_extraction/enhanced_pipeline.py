@@ -5,6 +5,7 @@ Integrates the new table extractor with improved workflow management.
 
 import logging
 import json
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -15,6 +16,7 @@ from .extractor import ToxicityDataExtractor
 from .table_extractor import TableToxicityExtractor
 from .parsers.pmc_xml import PMCXMLParser
 from .parsers.bioc_parser import BioCParser
+from .enhanced_parser import EnhancedPMCXMLParser
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,8 @@ class EnhancedToxicityExtractionPipeline:
             save_intermediate: Save CSV files for each paper
             save_individual_json: Save detailed JSON results for each paper (useful for SLURM)
         """
+        start_ts = pd.Timestamp.now()
+        start_time = time.perf_counter()
         all_lab_results = []
         all_organ_results = []
         processing_stats = {
@@ -44,17 +48,23 @@ class EnhancedToxicityExtractionPipeline:
             "text_extractions": 0,
             "failed_files": 0
         }
+        file_timings: List[Dict[str, Any]] = []
         
         for i, xml_file in enumerate(xml_files, 1):
             logger.info("Processing file %d/%d: %s", i, len(xml_files), xml_file)
+            t0 = time.perf_counter()
+            base_name = Path(xml_file).stem
+            file_lab_rows = 0
+            file_organ_rows = 0
+            file_stats_local: Dict[str, Any] = {}
+            success = False
             try:
                 lab_df, organ_df, file_stats = self._process_pmc_file_enhanced(xml_file)
                 
                 # Update processing statistics
                 processing_stats["table_extractions"] += file_stats.get("table_extractions", 0)
                 processing_stats["text_extractions"] += file_stats.get("text_extractions", 0)
-                
-                base_name = Path(xml_file).stem
+                file_stats_local = file_stats
                 
                 if save_intermediate:
                     lab_df.to_csv(self.output_dir / f"{base_name}_lab_results.csv", index=False)
@@ -88,6 +98,9 @@ class EnhancedToxicityExtractionPipeline:
                     
                 all_lab_results.append(lab_df)
                 all_organ_results.append(organ_df)
+                file_lab_rows = len(lab_df)
+                file_organ_rows = len(organ_df)
+                success = (file_lab_rows + file_organ_rows) > 0
                 
             except Exception as e:
                 logger.error("Failed to process %s: %s", xml_file, e)
@@ -95,7 +108,6 @@ class EnhancedToxicityExtractionPipeline:
                 
                 # Save error information for failed files when using individual JSON
                 if save_individual_json:
-                    base_name = Path(xml_file).stem
                     error_result = {
                         "pmid": base_name,
                         "file_path": xml_file,
@@ -118,8 +130,22 @@ class EnhancedToxicityExtractionPipeline:
                     json_path = self.output_dir / f"{base_name}_results.json"
                     with open(json_path, 'w', encoding='utf-8') as f:
                         json.dump(error_result, f, indent=2, ensure_ascii=False)
-                        
-                continue
+            finally:
+                dt = time.perf_counter() - t0
+                file_timings.append({
+                    "pmid": base_name,
+                    "file_path": xml_file,
+                    "seconds": round(dt, 3),
+                    "lab_rows": int(file_lab_rows),
+                    "organ_rows": int(file_organ_rows),
+                    "tables": int(file_stats_local.get("table_extractions", 0) if isinstance(file_stats_local, dict) else 0),
+                    "texts": int(file_stats_local.get("text_extractions", 0) if isinstance(file_stats_local, dict) else 0),
+                    "success": bool(success),
+                })
+                
+                # Move on to next file after timing is recorded
+                if not success and (file_lab_rows + file_organ_rows) == 0 and 'error' in (file_stats_local or {}):
+                    pass
 
         # Combine results
         combined_lab_df = pd.concat(all_lab_results, ignore_index=True) if all_lab_results else pd.DataFrame()
@@ -130,12 +156,25 @@ class EnhancedToxicityExtractionPipeline:
         combined_organ_df.to_csv(self.output_dir / "combined_organ_results.csv", index=False)
         
         # Save processing statistics
+        total_time = time.perf_counter() - start_time
+        end_ts = pd.Timestamp.now()
+        processing_stats.update({
+            "start_time": start_ts.isoformat(),
+            "end_time": end_ts.isoformat(),
+            "total_wall_time_sec": round(total_time, 3),
+            "avg_time_per_file_sec": round(total_time / processing_stats["total_files"], 3) if processing_stats["total_files"] else 0.0,
+            "files_per_min": round((processing_stats["total_files"] / total_time) * 60.0, 2) if total_time > 0 else 0.0,
+        })
         stats_df = pd.DataFrame([processing_stats])
         stats_df.to_csv(self.output_dir / "processing_statistics.csv", index=False)
+        # Save per-file timings
+        pd.DataFrame(file_timings).to_csv(self.output_dir / "file_timings.csv", index=False)
         
         logger.info(
-            "Enhanced extraction complete. Lab tests: %d, Organ injuries: %d. "
+            "Enhanced extraction complete in %.2fs (%.2f files/min). Lab tests: %d, Organ injuries: %d. "
             "Stats: %d table extractions, %d text extractions, %d failed files",
+            total_time,
+            processing_stats["files_per_min"],
             len(combined_lab_df), len(combined_organ_df),
             processing_stats["table_extractions"], 
             processing_stats["text_extractions"],
@@ -171,8 +210,12 @@ class EnhancedToxicityExtractionPipeline:
         if format_type == 'bioc':
             return BioCParser(xml_path)
         else:
-            # Default to PMC parser for JATS and unknown formats
-            return PMCXMLParser(xml_path)
+            # Prefer enhanced PMC parser with richer table extraction; fallback to baseline PMC parser
+            try:
+                return EnhancedPMCXMLParser(xml_path)
+            except Exception as e:
+                logger.debug("Enhanced PMC parser failed for %s, falling back. Error: %s", xml_path, e)
+                return PMCXMLParser(xml_path)
 
     def _process_pmc_file_enhanced(self, xml_path: str) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, int]]:
         """Enhanced processing with separate table and text workflows"""
@@ -198,8 +241,11 @@ class EnhancedToxicityExtractionPipeline:
                 
                 if lab_results or organ_results:
                     file_stats["table_extractions"] += 1
-                    all_lab_results.extend(asdict(r) for r in lab_results)
-                    all_organ_results.extend(asdict(r) for r in organ_results)
+                    # Support both dataclass instances and already-dict rows
+                    for r in lab_results:
+                        all_lab_results.append(asdict(r) if hasattr(r, '__dataclass_fields__') else r)
+                    for r in organ_results:
+                        all_organ_results.append(asdict(r) if hasattr(r, '__dataclass_fields__') else r)
                     logger.debug("Table %s: extracted %d lab tests, %d organ injuries", 
                                table['id'], len(lab_results), len(organ_results))
                     
@@ -248,8 +294,10 @@ class EnhancedToxicityExtractionPipeline:
                             
                             if lab_results or organ_results:
                                 file_stats["text_extractions"] += 1
-                                all_lab_results.extend(asdict(r) for r in lab_results)
-                                all_organ_results.extend(asdict(r) for r in organ_results)
+                                for r in lab_results:
+                                    all_lab_results.append(asdict(r) if hasattr(r, '__dataclass_fields__') else r)
+                                for r in organ_results:
+                                    all_organ_results.append(asdict(r) if hasattr(r, '__dataclass_fields__') else r)
                                 processed_sections += 1
                                 
                     except Exception as e:
@@ -273,8 +321,10 @@ class EnhancedToxicityExtractionPipeline:
                             full_body, pmid, "section_full_body"
                         )
                         if lab_results or organ_results:
-                            all_lab_results.extend(asdict(r) for r in lab_results)
-                            all_organ_results.extend(asdict(r) for r in organ_results)
+                            for r in lab_results:
+                                all_lab_results.append(asdict(r) if hasattr(r, '__dataclass_fields__') else r)
+                            for r in organ_results:
+                                all_organ_results.append(asdict(r) if hasattr(r, '__dataclass_fields__') else r)
                             file_stats["text_extractions"] += 1
                 except Exception as e:
                     logger.debug("Full body extraction failed: %s", e)
@@ -290,8 +340,10 @@ class EnhancedToxicityExtractionPipeline:
                                 para_text, pmid, "section_paragraphs"
                             )
                             if lab_results or organ_results:
-                                all_lab_results.extend(asdict(r) for r in lab_results)
-                                all_organ_results.extend(asdict(r) for r in organ_results)
+                                for r in lab_results:
+                                    all_lab_results.append(asdict(r) if hasattr(r, '__dataclass_fields__') else r)
+                                for r in organ_results:
+                                    all_organ_results.append(asdict(r) if hasattr(r, '__dataclass_fields__') else r)
                                 file_stats["text_extractions"] += 1
                     except Exception as e:
                         logger.debug("Paragraph extraction failed: %s", e)
@@ -431,10 +483,15 @@ class EnhancedToxicityExtractionPipeline:
         # Calculate ratio of entries with numerical data
         numerical_ratio = 0
         if 'value_mean' in df.columns:
-            numerical_entries = df[df['value_mean'] > 0].shape[0]
+            # Robustly coerce to numeric and count positives
+            s = pd.to_numeric(df['value_mean'], errors='coerce')
+            numerical_entries = (s > 0).sum()
             numerical_ratio = round(100 * numerical_entries / len(df), 2) if len(df) > 0 else 0
         elif 'frequency' in df.columns:
-            numerical_entries = df[df['frequency'] > 0].shape[0]
+            # Frequency often like "3/6", "2 of 5", or numeric strings; treat rows with any digits as numerical
+            freq = df['frequency'].astype(str)
+            mask = freq.notna() & freq.str.strip().ne('') & freq.str.lower().ne('nan') & freq.str.contains(r'\d')
+            numerical_entries = int(mask.sum())
             numerical_ratio = round(100 * numerical_entries / len(df), 2) if len(df) > 0 else 0
             
         return {

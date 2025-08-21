@@ -215,7 +215,19 @@ def run_single_pipeline(args, provider, logger):
     if args.enhanced and 'overall_quality_score' in metrics:
         print(f"Overall quality score: {metrics['overall_quality_score']}/100")
         
-    print("\\nDetailed metrics:")
+        # Load and print timing if available
+        stats_path = os.path.join(args.out, "processing_statistics.csv")
+        if os.path.exists(stats_path):
+            try:
+                import pandas as pd
+                stats = pd.read_csv(stats_path).to_dict(orient='records')[0]
+                print(f"Total wall time: {stats.get('total_wall_time_sec', 0):.2f}s")
+                print(f"Avg time per file: {stats.get('avg_time_per_file_sec', 0):.2f}s")
+                print(f"Throughput: {stats.get('files_per_min', 0):.2f} files/min")
+            except Exception:
+                pass
+
+        print("\nDetailed metrics:")
     print(json.dumps(metrics, indent=2))
     
     # Save metrics

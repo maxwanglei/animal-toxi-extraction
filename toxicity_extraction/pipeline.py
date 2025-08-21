@@ -1,4 +1,5 @@
 import logging
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -20,24 +21,57 @@ class ToxicityExtractionPipeline:
         self.output_dir.mkdir(exist_ok=True)
 
     def process_batch(self, xml_files: List[str], save_intermediate: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        start_time = time.perf_counter()
         all_lab_results = []
         all_organ_results = []
+        file_timings: List[Dict[str, Any]] = []
         for i, xml_file in enumerate(xml_files, 1):
             logger.info("Processing file %d/%d: %s", i, len(xml_files), xml_file)
+            t0 = time.perf_counter()
+            base_name = Path(xml_file).stem
             lab_df, organ_df = self._process_pmc_file(xml_file)
             if save_intermediate:
-                base_name = Path(xml_file).stem
                 lab_df.to_csv(self.output_dir / f"{base_name}_lab_results.csv", index=False)
                 organ_df.to_csv(self.output_dir / f"{base_name}_organ_results.csv", index=False)
             all_lab_results.append(lab_df)
             all_organ_results.append(organ_df)
+            dt = time.perf_counter() - t0
+            file_timings.append({
+                "pmid": base_name,
+                "file_path": xml_file,
+                "seconds": round(dt, 3),
+                "lab_rows": int(len(lab_df)),
+                "organ_rows": int(len(organ_df)),
+            })
 
         combined_lab_df = pd.concat(all_lab_results, ignore_index=True) if all_lab_results else pd.DataFrame()
         combined_organ_df = pd.concat(all_organ_results, ignore_index=True) if all_organ_results else pd.DataFrame()
         combined_lab_df.to_csv(self.output_dir / "combined_lab_results.csv", index=False)
         combined_organ_df.to_csv(self.output_dir / "combined_organ_results.csv", index=False)
+        total_time = time.perf_counter() - start_time
+        # Save per-file timings
+        pd.DataFrame(file_timings).to_csv(self.output_dir / "file_timings.csv", index=False)
+        files_per_min = round((len(xml_files) / total_time) * 60.0, 2) if total_time > 0 else 0.0
+        # Save processing statistics for consistency with enhanced pipeline
+        try:
+            _stats = [{
+                "total_files": len(xml_files),
+                "start_time": None,
+                "end_time": None,
+                "total_wall_time_sec": round(total_time, 3),
+                "avg_time_per_file_sec": round(total_time / len(xml_files), 3) if len(xml_files) else 0.0,
+                "files_per_min": files_per_min,
+                "table_extractions": None,
+                "text_extractions": None,
+                "failed_files": None,
+            }]
+            pd.DataFrame(_stats).to_csv(self.output_dir / "processing_statistics.csv", index=False)
+        except Exception:
+            pass
         logger.info(
-            "Extraction complete. Lab tests: %d, Organ injuries: %d",
+            "Extraction complete in %.2fs (%.2f files/min). Lab tests: %d, Organ injuries: %d",
+            total_time,
+            files_per_min,
             len(combined_lab_df),
             len(combined_organ_df),
         )

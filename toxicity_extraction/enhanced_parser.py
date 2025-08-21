@@ -223,7 +223,10 @@ class EnhancedPMCXMLParser:
             # Contains numerical data patterns
             bool(re.search(r'\d+\.?\d*\s*[±+\-]\s*\d+\.?\d*', content)),
             # Contains measurement units
-            bool(re.search(r'\d+\.?\d*\s*(mg|g|kg|ml|l|%|u/l|mg/dl|μg)', content, re.IGNORECASE)),
+            # Measurement units including doses and activity units
+            bool(re.search(r'\b\d+\.?\d*\s*(mg|g|kg|ml|l|%|u/l|U/L|iu|IU|mg/dl|μg|ug|ng|pg|mmol/l|\bgy\b|p\s*fu|tcid\s*50)\b', content, re.IGNORECASE)),
+            # Per-day dosing patterns
+            bool(re.search(r'\b\d+\s*(mg|μg|ug|g)/(kg|body\s*weight)/(day|d)\b', content, re.IGNORECASE)),
             # Contains table-like headers
             any(keyword in content.lower() for keyword in ['dose', 'group', 'treatment', 'control', 'mean', 'std'])
         ]

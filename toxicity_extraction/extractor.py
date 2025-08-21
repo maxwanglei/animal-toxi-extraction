@@ -47,9 +47,11 @@ REQUIRED FORMAT (copy exactly, replace values):
             "drug": "string",
             "dose": "string",
             "lab_test": "string",
+            "unit": "string or null",
             "value_mean": 0,
             "value_std": 0,
             "value_raw": "string",
+            "descriptive_values": "string or null",
             "sample_size": 0,
             "time_point": "string",
             "species": "string",
@@ -66,6 +68,7 @@ REQUIRED FORMAT (copy exactly, replace values):
             "severity": "string",
             "time_point": "string",
             "species": "string",
+            "descriptive_values": "string or null",
             "additional_info": "string"
         }
     ]
@@ -77,6 +80,9 @@ STRICT RULES:
 - NO code blocks or backticks
 - ALL keys and string values must have double quotes
 - Numbers without quotes
+- For lab_tests, set unit (e.g., "U/L", "mg/dL") when present; if numerical values are absent but qualitative or descriptive statements (e.g., "increased", "significantly reduced") are present, set descriptive_values to that text and leave value_mean/value_std null.
+- For organ_injuries, if frequencies are not given, capture descriptive observations in descriptive_values.
+- Treat treatment names broadly: drugs, vaccines, radiation, nanoparticles; put the treatment as 'drug' and capture dose with units and regimen where available (e.g., "5 Gy", "2×10^8 PFU", "10 mg/kg/day for 7d").
 - Test your JSON before responding"""
 
     def assess_relevance(self, content: str, content_type: str = "text") -> Dict[str, Any]:
@@ -192,17 +198,22 @@ Analyze this content for animal toxicity data."""
         # Extract lab test values with more comprehensive patterns
         lab_patterns = [
             # Pattern: "AST (397.80 ± 17.64 U/L)" or similar
-            r'\b(ast|alt|alp|alkaline phosphatase|bilirubin|creatinine|bun|ck|creatine kinase)\b[^\d]*?(\d+(?:\.\d+)?)\s*(?:±|±|\+/-)\s*(\d+(?:\.\d+)?)\s*([a-z/]+)',
+            r'\b(ast|alt|alp|alkaline phosphatase|bilirubin|creatinine|bun|ck|creatine kinase)\b[^\d]*?(\d+(?:\.\d+)?)\s*(?:±|±|\+/-)\s*(\d+(?:\.\d+)?)\s*([a-zA-Z/%μ]+(?:/[a-zA-Z]+)?)',
             # Pattern: "AST: 397.80 U/L" or similar
-            r'\b(ast|alt|alp|alkaline phosphatase|bilirubin|creatinine|bun|ck|creatine kinase)\b[:\s]*(\d+(?:\.\d+)?)\s*([a-z/]+)',
+            r'\b(ast|alt|alp|alkaline phosphatase|bilirubin|creatinine|bun|ck|creatine kinase)\b[:\s]*(\d+(?:\.\d+)?)\s*([a-zA-Z/%μ]+(?:/[a-zA-Z]+)?)',
             # Pattern: "397.80 ± 17.64 U/L" near lab test names
-            r'(\d+(?:\.\d+)?)\s*(?:±|±|\+/-)\s*(\d+(?:\.\d+)?)\s*([a-z/]+).*?\b(ast|alt|alp|bilirubin|creatinine|bun|ck)\b',
+            r'(\d+(?:\.\d+)?)\s*(?:±|±|\+/-)\s*(\d+(?:\.\d+)?)\s*([a-zA-Z/%μ]+(?:/[a-zA-Z]+)?).*?\b(ast|alt|alp|bilirubin|creatinine|bun|ck)\b',
         ]
         
         # Extract drug name and dose
         drug_patterns = [
             r'\b(moringa\s+oleifera.*?extract|mohe)\b',
-            r'\b(\d+(?:\.\d+)?)\s*(mg|g|μg|ng)/kg',
+            # mg/kg formats with optional per-day
+            r'\b(\d+(?:\.\d+)?)\s*(mg|g|μg|ug|ng)/(kg)(?:/(?:day|d))?\b',
+            # Radiation dose Gy
+            r'\b(\d+(?:\.\d+)?)\s*(gy)\b',
+            # Viral load PFU or TCID50 (optionally in scientific notation like 2 × 10^8)
+            r'\b(\d+(?:\.\d+)?(?:\s*[×x]\s*10\^?\d+)?)\s*(pfu|tcid50)\b',
         ]
         
         # Find drug name
@@ -218,7 +229,15 @@ Analyze this content for animal toxicity data."""
         for pattern in drug_patterns[1:]:  # Dose patterns
             matches = re.findall(pattern, content, re.IGNORECASE)
             for match in matches:
-                doses.append(f"{match[0]} {match[1]}/kg")
+                try:
+                    if len(match) == 3 and str(match[2]).lower() == 'kg':
+                        doses.append(f"{match[0]} {match[1]}/{match[2]}")
+                    elif len(match) >= 2:
+                        doses.append(f"{match[0]} {match[1]}")
+                    else:
+                        doses.append(str(match[0]))
+                except Exception:
+                    continue
         
         # Extract lab values
         for pattern in lab_patterns:
@@ -247,17 +266,19 @@ Analyze this content for animal toxicity data."""
                     for dose in doses or ["Unknown dose"]:
                         lab_result = LabTestResult(
                             pmid=pmid,
-                            source_location=source_location,
                             drug=drug_name,
                             dose=dose,
                             lab_test=lab_test,
+                            unit=units,
                             value_mean=value_mean,
                             value_std=value_std,
                             value_raw=f"{value_mean} ± {value_std} {units}" if value_std else f"{value_mean} {units}",
+                            descriptive_values=None,
                             sample_size=0,  # Not extracted by regex
                             time_point="Unknown",
                             species="ICR mice",  # Default from content
-                            additional_info="Extracted by regex fallback"
+                            additional_info="Extracted by regex fallback",
+                            source_location=source_location,
                         )
                         lab_results.append(lab_result)
                 except (ValueError, IndexError) as e:
@@ -289,7 +310,6 @@ Analyze this content for animal toxicity data."""
                     for dose in doses or ["Unknown dose"]:
                         organ_result = OrganInjuryResult(
                             pmid=pmid,
-                            source_location=source_location,
                             drug=drug_name,
                             dose=dose,
                             injury_type=f"{organ} {injury}",
@@ -299,7 +319,9 @@ Analyze this content for animal toxicity data."""
                             severity="Unknown",
                             time_point="Unknown",
                             species="ICR mice",
-                            additional_info="Extracted by regex fallback"
+                            descriptive_values=None,
+                            additional_info="Extracted by regex fallback",
+                            source_location=source_location,
                         )
                         organ_results.append(organ_result)
                 except Exception as e:
@@ -340,9 +362,25 @@ Focus on lab test values (AST, ALT, creatinine, etc.) and organ injuries with nu
             lab_results: List[LabTestResult] = []
             for item in data.get("lab_tests", []):
                 try:
-                    item["pmid"] = pmid
-                    item["source_location"] = source_location
-                    lab_results.append(LabTestResult(**item))
+                    # Fill missing optional fields with safe defaults
+                    lab_defaults = {
+                        "drug": "Unknown",
+                        "dose": "Unknown",
+                        "lab_test": "Unknown",
+                        "unit": None,
+                        "value_mean": None,
+                        "value_std": None,
+                        "value_raw": "Unknown",
+                        "descriptive_values": None,
+                        "sample_size": None,
+                        "time_point": "Unknown",
+                        "species": "Unknown",
+                        "additional_info": None,
+                    }
+                    merged = {**lab_defaults, **item}
+                    merged["pmid"] = pmid
+                    merged["source_location"] = source_location
+                    lab_results.append(LabTestResult(**merged))
                 except Exception as item_err:
                     logger.debug("Failed to create LabTestResult: %s", item_err)
                     continue
@@ -350,14 +388,26 @@ Focus on lab test values (AST, ALT, creatinine, etc.) and organ injuries with nu
             organ_results: List[OrganInjuryResult] = []
             for item in data.get("organ_injuries", []):
                 try:
-                    item["pmid"] = pmid
-                    item["source_location"] = source_location
+                    organ_defaults = {
+                        "drug": "Unknown",
+                        "dose": "Unknown",
+                        "injury_type": "Unknown",
+                        "frequency": 0,
+                        "total_animals": 0,
+                        "percentage": None,
+                        "severity": "Unknown",
+                        "time_point": "Unknown",
+                        "species": "Unknown",
+                        "descriptive_values": None,
+                        "additional_info": None,
+                    }
+                    merged = {**organ_defaults, **item}
+                    merged["pmid"] = pmid
+                    merged["source_location"] = source_location
                     # Calculate percentage if both frequency and total_animals are available
-                    if item.get("frequency") and item.get("total_animals"):
-                        item["percentage"] = (item["frequency"] / item["total_animals"]) * 100
-                    else:
-                        item["percentage"] = None  # Set default percentage
-                    organ_results.append(OrganInjuryResult(**item))
+                    if merged.get("frequency") and merged.get("total_animals"):
+                        merged["percentage"] = (merged["frequency"] / merged["total_animals"]) * 100
+                    organ_results.append(OrganInjuryResult(**merged))
                 except Exception as item_err:
                     logger.debug("Failed to create OrganInjuryResult: %s", item_err)
                     continue
